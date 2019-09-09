@@ -1,0 +1,447 @@
+
+proc    MBF_Haralick (
+        objectlist objects= "objects" in "Objects to be analysed - the ROIs",
+        image image = image in "reference image. For the faster performane the input image is converted to 8-bit dynamic range.",
+        String orientation  = "east" in "Orientation of offset",
+        int step  = 1 in "Offset step",
+        table haralick_table out "Haralick table",
+        )
+        "Calculates Haralick texture features of objects. Only the pixels which belong to objects are taken into account. (the restriction does not apply to the shifted pixels). For the faster performane the input image is converted to 8-bit dynamic range. "
+{
+        set(objects_in=objects)
+        set(in_image=image)
+        set(im_ref=image)
+        //set(orientation="east") 
+        //set orienataion
+        if(orientation=="north")
+                set(xstep=0)
+                set(ystep=-step)
+        end()
+        
+        if(orientation=="east")
+                set(xstep=step)
+                set(ystep=0)
+        end()
+        
+        if(orientation=="south")
+                set(xstep=0)
+                set(ystep=step)
+        end()
+        
+        if(orientation=="west")
+                set(xstep=-step)
+                set(ystep=0)
+        end()
+        
+
+        // converts the input image im_ref to unsigned char 
+        if(im_ref.elemtype==5) // if unsigned char 
+                set(signal=im_ref)
+                set(signal.factor=1)
+        else()
+                // converts to unsigned char 
+                //convelems(im_ref, size=1, shiftnegative=yes, clipoutofrange=yes, neginfinity=0, nonnumeric=0)
+                //fix from Peet
+                convelems(im_ref, size=1, shiftnegative=yes, clipoutofrange=no, neginfinity=0, nonnumeric=0, allowfactorchange=1 )
+                set(signal=result)
+                set(signal.factor=1)
+        end()
+
+        //Discards from the input objects these pixels which will be shifted out of image
+        set(maxshift=iif(abs(xstep)>abs(ystep), abs(xstep), abs(ystep)))
+        if(maxshift>1)
+                // correction is needed
+                blank(im_ref.width,im_ref.height,1)
+                rectmask((abs(xstep)-xstep)/2, (abs(ystep)-ystep)/2, im_ref.width-(abs(xstep)+xstep)/2, im_ref.height-(abs(ystep)+ystep)/2,image=image)
+                and(image=objects_in.body.image,mask=mask.image)
+                Stencil2Objects(image)
+                set(objects_corrected=objects_in)
+        else()
+                set(objects_corrected=objects_in) //no need for correction
+        end()
+
+        // Creates an image with pixel values equal to signal[x+xstep,y+ystep],  except at image edges
+        // Creates a kernel
+        set(kernelwidth=iif(abs(xstep)>abs(ystep), 2*abs(xstep)+1, 2*abs(ystep)+1))
+        blank(kernelwidth,kernelwidth)
+        set(image[(kernelwidth-1)/2+xstep,(kernelwidth-1)/2+ystep]=1)
+        set(image.type="mask")
+        set(kernel1=image.vector)
+
+        convolution(image=signal,convolutionkernel=kernel1)
+        set(IM_neighbour=image) //Image with pixel values equal to signal[x+xstep,y+ystep], except at image edges
+        
+        // Creates a image with pixel value representing a pair of intensities at the images Signal and  IM_neighbour, i.e. (0, 0), (0,1) ... (0,255), (1,0), ... (1,255)...(255,255) 
+        mul(signal, 256,result_type="unsigned,short")
+        plus(result,IM_neighbour,result_type="unsigned,short")
+        and(image=result,mask=objects_corrected.body.mask.image)
+        set(result=image)
+        set(result.type="stencil")
+        stencil2objects(result) // Creates a list, one object = one pair of intensities at the images Signal and  IM_neighbour, i.e. (0, 0), (0,1) ... (0,255), (1,0), ... (1,255)...(255,255) 
+        calcarea()
+        objectfilter(area>0) //Discards the intensity pairs, which are not present at the image 
+        calcstat("max", attrname="I_pixel",stencil=body, image=signal) //pixel intensity
+        calcstat("max", attrname="I_neighbour",stencil=body, image=IM_neighbour) //intensity at position x+xstep, y+ystep
+        set(IM_IntensityPairs=objects.body.image)
+        
+        // For the faster performance deletes superfluous attributes
+        // Please note, that generally it is not allowed to delete body,border and index attributes as it results with non-consistent data, which could lead to crash in the next steps  
+        deleteattr(area,body,border,index)  
+        set(OL_IntensityPairs=objects) //List of Intensity Pairs
+        
+        
+        Foreach(0..objects_corrected.count-1,"i2") //loop over objects (cells, nuclei etc)
+                objectfilter(objectindex==i2,objects=objects_corrected)//Object list with a single object (cell, nucleus etc)
+                //set(objects=objects_corrected)
+                set(ObjectArea=objects.area.sum) //vector with a single element -> scalar 
+                and(image= IM_IntensityPairs,mask=objects.body.mask.image)
+        
+                setattr(single_object,image.vector,objects=OL_IntensityPairs) //List of Intensity Pairs
+                calcarea(single_object)
+                deleteattr(single_object)
+        
+                objectfilter(single_object_area) //Discards these intensity pairs, which are missing on the current object (single_object_area>0)
+        
+                calcattr(f,1.0*single_object_area/ObjectArea)
+                calcattr(asm,f*f)
+                calcattr(contrast, f*(i_pixel-I_neighbour)*(i_pixel-I_neighbour))
+                calcattr(IDM, f/(1+(i_pixel-I_neighbour)*(i_pixel-I_neighbour)))
+                calcattr(entropy,-f*ln(f))
+        
+        
+
+                push(asm_vec, 1.0*objects.asm.sum)
+                push(contrast_vec, 1.0*objects.contrast.sum)
+                push(IDM_vec, 1.0*objects.IDM.sum)
+                push(entropy_vec, 1.0*objects.entropy.sum)
+                push(sum_vec, 1.0*objects.f.sum)
+        end()
+        
+        
+        
+        set(Haralick_table=tbl("Haralick_ASM_"& step=asm_vec, "Haralick_contrast_" & step=contrast_vec, "Haralick_IDM_"&step=IDM_vec, "Haralick_entropy_"&step=entropy_vec, "Haralick_sum_"&step=sum_vec))
+
+
+        
+}
+
+
+proc    MBF_getTextures_radialshift (
+        objectlist objects= "objects" inout "Objects to be analysed - the ROIs",
+        image image = image in "Reference image. For the faster performance the input image is converted to 8-bit dynamic range.",
+        double shiftradius  = "1" in "Radius of the radial shift, radius of the ring around a pixel",
+        table haralick_table out "Haralick table",
+        )
+        "Calculates Haralick texture features of objects with radial shift (radius is given with the input shiftradius). Only the pixels which belong to objects are taken into account (the restriction does not apply to the shifted pixels). For the faster performance the input image is converted to 8-bit dynamic range. "
+{
+        set(objects_in=objects)
+        set(im_ref=image)
+                
+        // converts the input image im_ref to unsigned char 
+        if(im_ref.elemtype==5) // if unsigned char 
+                set(signal=im_ref)
+                set(signal.factor=1)
+        else()
+                // converts to unsigned char 
+                convelems(im_ref, size=1, shiftnegative=yes, clipoutofrange=yes, neginfinity=0, nonnumeric=0)
+                set(signal=result)
+                set(signal.factor=1)
+        end()
+
+        //Discards from the input objects these pixels which will be shifted out of image
+        set(shiftradius2=ceil(shiftradius)+1)
+        blank(im_ref.width,im_ref.height,1)
+        ClearBorders(stencil=objects_in.body.image,edge=shiftradius2)
+        Stencil2Objects(stencil)
+        set(objects_corrected=objects_in)
+
+        // Creates an image with pixel values equal to mean intensity at a ring around a pixel (radius of the ring is equal to shiftradius)
+        // Creates a ribbon-like kernel
+        ConvolutionMask("ribbon",InnerRadius=shiftradius,radius=shiftradius+1)
+        convolution(image=signal)
+        set(IM_neighbour=image) //Image with pixel values equal to mean intensity at a ring around a pixel (radius of the ring is equal to shiftradius)
+        
+        // Creates a image with pixel value representing a pair of intensities at the images Signal and  IM_neighbour, i.e. (0, 0), (0,1) ... (0,255), (1,0), ... (1,255)...(255,255) 
+        mul(signal, 256,result_type="unsigned,short")
+        plus(result,IM_neighbour,result_type="unsigned,short")
+        and(image=result,mask=objects_corrected.body.mask.image)
+        set(result=image)
+        set(result.type="stencil")
+        stencil2objects(result) // Creates a list, one object = one pair of intensities at the images Signal and  IM_neighbour, i.e. (0, 0), (0,1) ... (0,255), (1,0), ... (1,255)...(255,255) 
+        calcarea()
+        objectfilter(area>0) //Discards the intensity pairs, which are not present at the image 
+        calcstat("max", attrname="I_pixel",stencil=body, image=signal) //pixel intensity
+        calcstat("max", attrname="I_neighbour",stencil=body, image=IM_neighbour) //intensity at position x+xstep, y+ystep
+        set(IM_IntensityPairs=objects.body.image)
+        
+        // For the faster performance deletes superfluous attributes
+        // Please note, that generally it is not allowed to delete body,border and index attributes as it results with non-consistent data, which could lead to crash in the next steps  
+        deleteattr(area,body,border,index)  
+        set(OL_IntensityPairs=objects) //List of Intensity Pairs
+        
+        
+        Foreach(0..objects_corrected.count-1,"i2") //loop over objects (cells, nuclei etc)
+                objectfilter(objectindex==i2,objects=objects_corrected)//Object list with a single object (cell, nucleus etc)
+        
+                set(ObjectArea=objects.area.sum) //vector with a single element -> scalar 
+                and(image= IM_IntensityPairs,mask=objects.body.mask.image)
+        
+                setattr(single_object,image.vector,objects=OL_IntensityPairs) //List of Intensity Pairs
+                calcarea(single_object)
+                deleteattr(single_object)
+        
+                objectfilter(single_object_area) //Discards these intensity pairs, which are missing on the current object (single_object_area>0)
+        
+                calcattr(f,1.0*single_object_area/ObjectArea)
+                calcattr(asm,f*f)
+                calcattr(contrast, f*(i_pixel-I_neighbour)*(i_pixel-I_neighbour))
+                calcattr(IDM, f/(1+(i_pixel-I_neighbour)*(i_pixel-I_neighbour)))
+                calcattr(entropy,-f*ln(f))
+        
+                push(asm_vec, 1.0*objects.asm.sum)
+                push(contrast_vec, 1.0*objects.contrast.sum)
+                push(IDM_vec, 1.0*objects.IDM.sum)
+                push(entropy_vec, 1.0*objects.entropy.sum)
+                push(sum_vec, 1.0*objects.f.sum)
+        end()
+        
+        
+        //set(name1=_['Haralick_ASM '& step])
+        set(Haralick_table=tbl(Haralick_ASM=asm_vec, Haralick_contrast=contrast_vec, Haralick_IDM=IDM_vec, Haralick_entropy=entropy_vec, Haralick_sum=sum_vec))
+        
+        
+}
+
+
+
+
+
+proc    MBF_TAS (
+        objectlist objects = objects in "Objects to be analysed - the ROIs",
+        image image = image in "reference image.",
+        String ratio_method  = "mean" in "normalise again mean or median",
+        String removeNAN = "true" in "Remove objects with any TAS features equalling NAN.  Default is true.",
+        int range = 0.2 in "Threshold bracket",
+        table TAS_table out "Table of threshold adjacency statistics",
+        
+        )
+        "Calculates Threhsold Adjacency Statistics of objects. Hamilton et al. BMC informatics, 2007. 8:110 "
+{
+
+rename(in_objects=objects)
+rename(in_image=image)
+calcStat(ratio_method, Stencil=body, Image=in_image, objects=in_objects)
+blank(in_image.width, in_image.height)
+convelems(image, sign = "signed")
+if(ratio_method=="mean")
+        carryobjects(in_objects.body, objects.mean, image=result)
+Else()
+        carryobjects(in_objects.body, objects.median, image=result)
+end()
+
+set(img_avg=image)
+div(in_image, image, result_type="float")
+mask("inf", image=result)
+mul(not(mask), result, result_type= "float")
+set(ratio_image=result)
+
+create("table")
+foreach(0..2, "i")
+
+        if(i==0) 
+                set(range_min=range)
+                set(range_max=range)
+        end()
+        if(i==1)
+                set(range_min=range)
+                set(range_max=500)
+        end()
+        if(i==2)
+                set(range_min=0)
+                set(range_max=500)      
+        end()
+        
+        mask(1-range_min, image=ratio_image)
+        set(mask1=mask)
+        mask(1+range_max, image=ratio_image)
+        set(mask2=mask)
+        minus(mask1, mask2)
+        rename(mask_all=result)
+        blank(3,3,9)
+        rename(kernel=image)
+        convolution(image=mask_all, ConvolutionKernel=kernel, Faster=yes, ConvolutionKernelFactor=9)
+        rename(adj_img=image)
+        calcstat("sum", AttrName="tas_mTotal"&i+1, Stencil=body, Image=mask_all, objects=objects)
+        //stop()
+//set(removeNAN=false)
+
+if(removeNAN)
+        objectfilter("tas_mTotal"&i+1&">0", objects=objects)
+end()
+
+        mul(adj_img, mask_all)
+        set(_["adj_mask"&i]=result)
+
+        foreach(1..9, "p")
+                mask(p, image=_["adj_mask"&i])
+                set(mask3=mask)
+                mask(p+1, image=_["adj_mask"&i])
+                rename(mask4=mask)
+                minus(mask3, mask4, neg_method="zero")
+                set(_["m"& p]=result)
+                
+                if((i*9)+p<10) 
+                        set(pad="0")
+                else()
+                        set(pad="")
+                end()
+                
+                calcstat("sum", AttrName="tas"& pad & (i*9)+p , Stencil=body, Image=_["m"& p], objects=objects)
+                
+                div(_["objects.tas"&pad & (i*9)+p], _["objects.tas_mTotal"&i+1], result_type="float")
+                
+                
+                        
+                set(_["objects.tas"&pad & (i*9)+p]=result)
+        //      Insert_At(table, result, "TAS"&pad & (i*9)+p, table.columncount)
+
+                
+                if((i*9)+p==22)
+                //      stop()
+                end()
+        end()
+
+end()
+
+foreach(1..27, "t")
+
+        if(t<10) 
+                set(pad="0")
+        else()
+                set(pad="")
+        end()
+
+        Insert_At(table, _["objects.TAS"& pad & t], "TAS"&pad & t & "_" & (range*100), table.columncount)
+        
+end()
+
+
+foreach(1..3, "m")
+
+        Insert_At(table, _["objects.tas_mTotal"&m], "tas_mTotal"&m , table.columncount)
+end()   
+
+set(TAS_table=table)
+}
+
+
+
+
+
+//Created by Sean Cianflone, DWA lab, June 11, 2008
+
+proc    MBF_RadialMoment (
+        image image = "image" in "Image with objects to be analysed",
+        objectlist objects = objects in "Objects to be analysed - the ROIs",
+        string type = "center" in "Weighting direction of radial moment, either highlighting the border or center - input 'border' or 'center'",
+        integer k = 1 in "Integer value with with to exponentiate r - ie. kth radial moment",
+        //string zonetype = standard in "Zone type - either "standard" or "equidistant"",
+        //OUTPUT
+        objectlist objects out "Objects with kth radial moment",
+        )
+"Calculates the kth radial moment (given by the integral of (r^k)*I(r) where I(r) is the intensity of the object based on object radius) of detected objects highlighting either the center or border as defined by the user."
+        
+
+
+{
+//procedure start
+
+set(original=image)
+set(ROI_obj=objects)
+
+calcstat("sum", stencil=ROI_obj.body, image=original)
+rename(ROI_obj_sum=objects)
+
+//set(std="standard")
+//set(equ="equidistant")
+//create radial image - center-max in type
+calczone(objects=ROI_obj, Stencil=body, ZoneType="standard")
+        zoneimage(objects=objects)
+        set(radial=zoneimage)   
+
+//standardize radial image by dividing by max (objectwise)
+CalcStat("max", Image=radial, objects=ROI_obj)
+        set(ROI_obj=objects)
+
+blank(original.width, original.height, 1)
+convelems(image, "float", nonnumeric=0)
+carryobjects(ROI_obj.body, ROI_obj.max, image=result)
+rename(maxzone=image)
+
+//center-max radial image
+set(stdradial=radial/maxzone)
+//creation of border-max radial image
+set(stdborderrad=((-1)*stdradial)+1)
+
+//choosing which type (border or center) to use in the computation
+set(direction="C")
+
+if(type=="border")
+        set(direction="B")
+        set(radimage=stdborderrad)
+                        else()
+                        if(type=="center")
+                                set(radimage=stdradial)
+                        end()
+end()
+
+
+
+//computation of kth radial moment
+
+MBF_ExponentiateImage(radimage,k)
+
+set(expedimage=image)
+
+calcintensity(Image=expedimage*original, Total=yes, objects=ROI_obj)
+blank(original.width, original.height, 0)
+convelems(image, "float", nonnumeric=0)
+carryobjects(ROI_obj.body, objects.intensity, image=result)
+set(radmoment=image)
+
+
+//creating an object list with kth radial moment attached to it
+setAttr("Radial"&direction&k, objects.intensity/ROI_obj_sum.sum, objects=ROI_obj)
+rename(radialmom_obj=objects)
+DeleteAttr(max, objects=radialmom_obj)
+
+
+}
+
+
+//Created by Sean Cianflone, DWAlab, June 10, 2008
+
+proc    MBF_ExponentiateImage (
+        image image = image in "Original image to be exponentiated",
+        integer k = integer in "Integer value with which to exponentiate the image",
+
+        //OUTPUT
+         image image = image out "Exponentiated Image",
+        )
+"Used to exponentiate an image to a given exponent."
+
+{
+set(baseimage=image)
+
+//recursive exponentiation algorithm
+
+foreach(1..k, "i")
+
+set(_["mult"&0]=1)
+set(_["mult"&i]=baseimage*_["mult"&(i-1)])
+
+end()
+
+set(image=_["mult"&k])
+
+}
